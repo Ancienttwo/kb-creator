@@ -1,0 +1,137 @@
+# kb-creator Obsidian Base view configuration
+# Pattern based on 转换进度.base for compliance knowledge base progress tracking.
+# Each view entry defines a tab in the Obsidian Base plugin.
+#
+# Usage: kb-creator generates a .base file from this template during the view phase.
+# The .base file sits in the vault root or a meta/ folder.
+
+base:
+  name: "{{vault_name}} 转换进度"
+  description: "Knowledge base conversion progress tracker"
+  source:
+    type: folder
+    path: "/"
+    recursive: true
+    filters:
+      - field: type
+        op: in
+        values: [source, chapter]
+
+views:
+  # ── View 1: Total Progress Overview ──
+  - name: "总览 / Overview"
+    type: table
+    columns:
+      - field: source_file
+        label: "源文件 / Source"
+        width: 280
+      - field: category
+        label: "分类 / Category"
+        width: 140
+      - field: type
+        label: "类型 / Type"
+        width: 80
+      - field: status
+        label: "状态 / Status"
+        width: 100
+      - field: format
+        label: "格式 / Format"
+        width: 60
+      - field: size_kb
+        label: "大小KB"
+        width: 70
+      - field: created
+        label: "创建时间"
+        width: 120
+    sort:
+      - field: category
+        order: asc
+      - field: source_file
+        order: asc
+    filter: []
+    group: []
+
+  # ── View 2: By Phase (pipeline status) ──
+  - name: "按阶段 / By Phase"
+    type: table
+    columns:
+      - field: source_file
+        label: "源文件 / Source"
+        width: 280
+      - field: status
+        label: "状态 / Status"
+        width: 100
+      - field: category
+        label: "分类 / Category"
+        width: 140
+      - field: chapter
+        label: "章节 / Chapter"
+        width: 120
+    sort:
+      - field: status
+        order: asc
+      - field: source_file
+        order: asc
+    filter: []
+    group:
+      - field: status
+        order:
+          - pending
+          - converted
+          - split
+          - linked
+          - done
+
+  # ── View 3: By Status (focus on incomplete) ──
+  - name: "待处理 / Incomplete"
+    type: table
+    columns:
+      - field: source_file
+        label: "源文件 / Source"
+        width: 280
+      - field: status
+        label: "状态 / Status"
+        width: 100
+      - field: category
+        label: "分类 / Category"
+        width: 140
+      - field: format
+        label: "格式 / Format"
+        width: 60
+    sort:
+      - field: status
+        order: asc
+      - field: category
+        order: asc
+    filter:
+      - field: status
+        op: not_in
+        values: [done]
+    group: []
+
+  # ── View 4: By Category ──
+  - name: "按分类 / By Category"
+    type: table
+    columns:
+      - field: source_file
+        label: "源文件 / Source"
+        width: 280
+      - field: type
+        label: "类型 / Type"
+        width: 80
+      - field: status
+        label: "状态 / Status"
+        width: 100
+      - field: chapter
+        label: "章节 / Chapter"
+        width: 120
+      - field: size_kb
+        label: "大小KB"
+        width: 70
+    sort:
+      - field: source_file
+        order: asc
+    filter: []
+    group:
+      - field: category
+        order: asc

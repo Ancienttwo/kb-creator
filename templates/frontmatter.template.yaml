@@ -1,0 +1,19 @@
+# kb-creator frontmatter template
+# Applied to every vault note during conversion/split phase.
+# Placeholders use {{variable}} syntax for programmatic substitution.
+#
+# Status flow: pending -> converted -> split -> linked -> done
+# Type values: source (original converted doc), chapter (split section), index (MOC page)
+
+source_file: "{{source_file}}"        # relative path to original source document
+format: "{{format}}"                  # pdf | docx | html | xlsx | txt
+size_kb: {{size_kb}}                  # original file size in KB
+category: "{{category}}"              # top-level grouping folder name
+chapter: "{{chapter}}"                # chapter/section identifier (empty for unsplit docs)
+parent: "{{parent}}"                  # wikilink to parent note or MOC, e.g. [[Category-MOC]]
+type: "{{type}}"                      # source | chapter | index
+status: "{{status}}"                  # pending | converted | split | linked | done
+tags:
+  - "{{domain}}"                      # domain tag, e.g. compliance, finance, legal
+  - "{{category_tag}}"                # category-level tag
+created: "{{created}}"               # ISO 8601 timestamp, e.g. 2026-03-22T12:00:00+08:00

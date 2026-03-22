@@ -1,0 +1,41 @@
+# kb-creator topic alias mapping
+# Maps topic IDs to their synonyms across languages.
+# Used by the link phase to detect topic references in note content
+# and connect them to the appropriate topic MOC.
+#
+# Structure:
+#   topic_id:
+#     zh_cn: [simplified Chinese variants]
+#     zh_tw: [traditional Chinese variants]
+#     en:    [English variants]
+
+kyc:
+  zh_cn: ["了解你的客户", "客户尽职调查", "客户身份识别", "KYC"]
+  zh_tw: ["瞭解你的客戶", "客戶盡職調查", "客戶身份識別", "KYC"]
+  en:    ["Know Your Customer", "KYC", "customer due diligence", "CDD", "customer identification"]
+
+aml:
+  zh_cn: ["反洗钱", "洗钱防制", "AML"]
+  zh_tw: ["反洗錢", "洗錢防制", "AML"]
+  en:    ["Anti-Money Laundering", "AML", "money laundering prevention"]
+
+compliance:
+  zh_cn: ["合规", "合规管理", "监管合规", "法规遵从"]
+  zh_tw: ["合規", "合規管理", "監管合規", "法規遵從"]
+  en:    ["compliance", "regulatory compliance", "compliance management"]
+
+disclosure:
+  zh_cn: ["信息披露", "资讯披露", "公告", "披露义务"]
+  zh_tw: ["資訊披露", "資訊揭露", "公告", "披露義務"]
+  en:    ["disclosure", "information disclosure", "public announcement", "disclosure obligations"]
+
+listing_rules:
+  zh_cn: ["上市规则", "上市条例", "上市准则", "主板规则", "创业板规则", "GEM规则"]
+  zh_tw: ["上市規則", "上市條例", "上市準則", "主板規則", "創業板規則", "GEM規則"]
+  en:    ["Listing Rules", "listing requirements", "Main Board rules", "GEM rules"]
+
+# ── Add project-specific topics below ──
+# example_topic:
+#   zh_cn: ["简体术语1", "简体术语2"]
+#   zh_tw: ["繁體術語1", "繁體術語2"]
+#   en:    ["English term 1", "English term 2"]
