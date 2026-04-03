@@ -1,25 +1,33 @@
 # kb-creator
 
-Agent-first knowledge base creation toolkit for turning source document collections into an Obsidian-ready vault through small JSON-only CLI stages.
+CLI-first knowledge-base builder and maintainer for Obsidian-first markdown repositories.
+
+`kb-creator` now has two layers:
+
+- `kb`: the primary top-level CLI for initializing, ingesting, compiling, checking, querying, and indexing a KB repo
+- `bin/kb-*.py`: low-level JSON-only stage commands preserved for compatibility and agent orchestration
+
+The design target is an agent-callable knowledge compiler, not just a one-shot document conversion pipeline.
 
 ## What It Does
 
-- Scans a source directory and reports supported files, language bias, grouping hints, and large-file risks.
-- Converts documents to Markdown with `markitdown`, with optional PDF table enhancement via `pdfplumber`.
-- Splits large Markdown files into chapter-level notes with frontmatter and stable filenames.
-- Injects structural and semantic wiki links across a vault and generates simple category MOCs.
-- Extracts summary candidates and injects externally generated TLDRs back into notes.
-- Builds a machine-readable vault registry for downstream retrieval and navigation.
-- Preserves resumable run artifacts in `.kb-artifacts/` and state in `.kb-state.json`.
+- Initializes a KB repository with `raw/`, `wiki/`, `outputs/`, `.kb-artifacts/`, and `.kb-state.json`.
+- Ingests source documents into normalized markdown under `raw/sources/`.
+- Compiles raw sources into `wiki/summaries/`, `wiki/concepts/`, and `wiki/indexes/`.
+- Enriches wiki navigation and cross-links using the existing linking engine.
+- Extracts or injects note summaries for downstream model workflows.
+- Runs KB health checks and writes both JSON artifacts and markdown reports.
+- Materializes query outputs into `outputs/qa/` for reusable research artifacts.
+- Builds an expanded machine-readable registry covering notes, sources, and outputs.
 
 ## Project Shape
 
-- `bin/`: thin CLI wrappers, one command per pipeline stage
-- `src/kb_creator/`: pipeline implementation
+- `bin/`: thin CLI wrappers, including the top-level `kb.py`
+- `src/kb_creator/`: core implementation for ingest, compile, operate, and low-level stages
 - `references/`: splitting, frontmatter, conversion, and Obsidian guidance
 - `templates/`: vault output templates
 - `tests/`: regression coverage for core contracts and stages
-- `SKILL.md`: orchestration contract used by higher-level agents
+- `SKILL.md`: thin orchestration wrapper used by higher-level agents
 
 ## Operating Contract
 
@@ -61,63 +69,74 @@ Or with `uv`:
 uv sync --dev
 ```
 
-## CLI Surface
-
-### `kb-scan`
-
-Scan a source directory and optionally persist `scan_report.json`.
+The package also exposes a console entrypoint:
 
 ```bash
-.venv/bin/python bin/kb-scan.py ./source-docs --artifacts-dir ./output/.kb-artifacts
+.venv/bin/kb --help
 ```
 
-### `kb-convert`
+## Top-Level CLI
 
-Check dependencies, convert a single file, or convert a JSON batch manifest.
+### `kb init`
+
+Initialize a KB repository root.
 
 ```bash
-.venv/bin/python bin/kb-convert.py --check-deps
-.venv/bin/python bin/kb-convert.py ./source/file.pdf ./output/converted --enhance-tables --artifacts-dir ./output/.kb-artifacts
+.venv/bin/python bin/kb.py init ./my-kb
 ```
 
-### `kb-split`
+### `kb ingest`
 
-Split a Markdown file or batch manifest with a JSON config.
+Scan and normalize source documents into `raw/sources/`.
 
 ```bash
-.venv/bin/python bin/kb-split.py ./output/converted/file.md ./output/vault --config ./split-config.json --artifacts-dir ./output/.kb-artifacts
+.venv/bin/python bin/kb.py ingest ./my-kb ./source-docs --enhance-tables
 ```
 
-Example split config:
+### `kb compile`
 
-```json
-{
-  "min_lines": 20,
-  "max_lines": 5000,
-  "patterns": [
-    { "regex": "^#{1,2}\\s+Chapter\\s+\\d+", "priority": 1, "type": "chapter" },
-    { "regex": "^##\\s+", "priority": 4, "type": "heading2" }
-  ]
-}
-```
-
-### `kb-link`
-
-Preview or apply wiki-link injection.
+Incrementally compile `raw/` into `wiki/`.
 
 ```bash
-.venv/bin/python bin/kb-link.py ./output/vault --mode both --dry-run --artifacts-dir ./output/.kb-artifacts
-.venv/bin/python bin/kb-link.py ./output/vault --mode both --artifacts-dir ./output/.kb-artifacts
+.venv/bin/python bin/kb.py compile ./my-kb
 ```
 
-### `kb-summary`
+### `kb health`
 
-Extract candidates for model-generated summaries, then inject finished summaries.
+Run integrity checks and emit a markdown report under `outputs/health/`.
 
 ```bash
-.venv/bin/python bin/kb-summary.py ./output/vault --extract --artifacts-dir ./output/.kb-artifacts
-.venv/bin/python bin/kb-summary.py ./output/vault --inject ./output/.kb-artifacts/all_summaries.json --format callout
+.venv/bin/python bin/kb.py health ./my-kb
 ```
+
+### `kb query`
+
+Materialize a query artifact under `outputs/qa/`.
+
+```bash
+.venv/bin/python bin/kb.py query ./my-kb --question "How does the pipeline work?" --update-registry
+```
+
+### `kb status`
+
+Show counts, tracked state, and recent outputs.
+
+```bash
+.venv/bin/python bin/kb.py status ./my-kb
+```
+
+## Low-Level Compatibility Commands
+
+The following commands remain supported and keep their JSON-only stdout contracts:
+
+- `bin/kb-scan.py`
+- `bin/kb-convert.py`
+- `bin/kb-split.py`
+- `bin/kb-link.py`
+- `bin/kb-summary.py`
+- `bin/kb-registry.py`
+
+These are still the right interface for fine-grained agent orchestration.
 
 ### `kb-registry`
 
@@ -129,26 +148,28 @@ Build `vault_registry.json` from the vault.
 
 ## Recommended Pipeline
 
-1. Run `kb-convert.py --check-deps`.
-2. Scan the source directory with `kb-scan.py`.
-3. Convert inputs into Markdown with `kb-convert.py`.
-4. Split oversized Markdown files with `kb-split.py`.
-5. Run `kb-link.py --dry-run`, inspect the plan, then apply linking.
-6. Extract summaries with `kb-summary.py --extract`, generate TLDRs outside the CLI, then inject them.
-7. Build the final registry with `kb-registry.py`.
+1. Run `kb init`.
+2. Run `kb ingest`.
+3. Run `kb compile`.
+4. Run `kb link`.
+5. Run `kb health`.
+6. Run `kb query` for reusable answer artifacts.
+7. Run `kb registry` or `kb status` as needed.
 
 ## Artifacts And Recovery
 
-The repo keeps pipeline logic in-repo, but run artifacts belong in the chosen output directory:
+Run artifacts belong in the KB root:
 
+- `raw/sources/` normalized markdown inputs
+- `wiki/summaries/`, `wiki/concepts/`, `wiki/indexes/`
+- `outputs/qa/`, `outputs/health/`
 - `.kb-artifacts/scan_report.json`
-- `.kb-artifacts/convert_report.json` or `.kb-artifacts/convert_single_detail.json`
-- `.kb-artifacts/link_report.json`
-- `.kb-artifacts/all_summaries.json`
+- `.kb-artifacts/health_report.json`
 - `.kb-artifacts/vault_registry.json`
+- `.kb-artifacts/all_summaries.json`
 - `.kb-state.json`
 
-The intent is resumable, agent-friendly execution without parsing terminal prose.
+The intent is resumable, agent-friendly execution without parsing terminal prose, while still preserving the older stage commands.
 
 ## Development
 

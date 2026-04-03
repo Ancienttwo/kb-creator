@@ -1,7 +1,7 @@
 """State management for incremental kb-creator sessions.
 
-The .kb-state.json file tracks task parameters, per-file status,
-and current phase so that an interrupted session can resume.
+The .kb-state.json file tracks both legacy pipeline state and the newer
+KB-repository layout used by the top-level ``kb`` CLI.
 """
 
 from __future__ import annotations
@@ -22,19 +22,27 @@ STATE_FILENAME = ".kb-state.json"
 class KBState:
     """Top-level session state."""
 
-    version: int = 1
+    version: int = 2
+    kb_root: str = ""
     source_dir: str = ""
     output_dir: str = ""
     output_mode: str = "local"  # local | vault
     domain: str = ""
     language: str = ""
-    phase: str = "init"  # init | scan | convert | split | link | summary | registry | view | done
+    phase: str = "init"  # init | ingest | compile | link | summary | health | query | registry | view | done
     grouping_strategy: str = "auto"
     split_config: dict[str, Any] = field(default_factory=dict)
     link_mode: str = "both"
     summary_mode: str = "extract"
     categories: dict[str, list[str]] = field(default_factory=dict)
+    raw_dir: str = "raw"
+    wiki_dir: str = "wiki"
+    outputs_dir: str = "outputs"
+    artifacts_dir: str = ".kb-artifacts"
     files: dict[str, dict[str, Any]] = field(default_factory=dict)
+    provenance: dict[str, list[str]] = field(default_factory=dict)
+    last_health_report: str = ""
+    last_query_output: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -77,6 +85,41 @@ class KBState:
         if error is not None:
             entry["error"] = error
         self.files[source] = entry
+
+    def mark_ingested(
+        self,
+        source: str,
+        raw_path: str,
+        source_hash: str,
+        category: str = "",
+    ) -> None:
+        """Record normalized raw content for a source file."""
+        entry = self.files.get(source, {"status": "pending"})
+        entry.update({
+            "status": "ingested",
+            "raw_path": raw_path,
+            "hash": source_hash,
+            "category": category,
+            "dirty": True,
+        })
+        self.files[source] = entry
+
+    def mark_compiled(
+        self,
+        source: str,
+        source_hash: str,
+        artifacts: list[str],
+    ) -> None:
+        """Record compile outputs produced from a source file."""
+        entry = self.files.get(source, {"status": "pending"})
+        entry.update({
+            "status": "compiled",
+            "hash": source_hash,
+            "artifacts": artifacts,
+            "dirty": False,
+        })
+        self.files[source] = entry
+        self.provenance[source] = artifacts
 
     def files_in_status(self, status: str) -> list[str]:
         """Return source files matching a given status."""

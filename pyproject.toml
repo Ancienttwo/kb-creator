@@ -1,12 +1,15 @@
 [project]
 name = "kb-creator"
-version = "0.1.0"
+version = "0.2.0"
 description = "Agent-first knowledge base creation toolkit for Obsidian vaults"
 requires-python = ">=3.11"
 dependencies = [
     "markitdown>=0.1.5",
     "pdfplumber>=0.10.0",
 ]
+
+[project.scripts]
+kb = "kb_creator.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

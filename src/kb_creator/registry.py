@@ -1,12 +1,13 @@
 """Vault registry generator.
 
-Scans all notes in a vault and produces a structured JSON index
-(vault_registry.json) for agent retrieval and navigation.
+Scans all notes in a vault or KB repository and produces a structured JSON
+index (`vault_registry.json`) for agent retrieval and navigation.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,22 +54,28 @@ def _extract_headings(content: str) -> list[str]:
     return headings[:10]  # Cap at 10
 
 
-def build_registry(vault_dir: Path, artifacts_dir: Path | None = None) -> Result:
-    """Build a vault registry indexing all notes.
+def _extract_wikilinks(content: str) -> list[str]:
+    """Extract wikilink targets from note content."""
+    return [match.group(1).split("|", 1)[0].split("#", 1)[0].strip() for match in re.finditer(r"\[\[([^\]]+)\]\]", content)]
 
-    The registry maps each note's relative path to its metadata,
-    enabling fast lookups by category, tag, parent, or keyword.
-    """
+
+def build_registry(vault_dir: Path, artifacts_dir: Path | None = None) -> Result:
+    """Build a registry for a vault or KB repository."""
     result = Result(ok=True, action="registry", inputs={"vault_dir": str(vault_dir)})
 
     if not vault_dir.is_dir():
         return Result(ok=False, action="registry", errors=[f"Not a directory: {vault_dir}"])
 
-    registry: dict[str, dict[str, Any]] = {}
-    indexed_fields = set()
+    kb_root = vault_dir if (vault_dir / "wiki").is_dir() else None
+    note_root = vault_dir / "wiki" if kb_root else vault_dir
 
-    for md_file in sorted(vault_dir.rglob("*.md")):
-        rel_path = str(md_file.relative_to(vault_dir))
+    note_entries: list[dict[str, Any]] = []
+    indexed_fields = set()
+    inbound_counts: dict[str, int] = {}
+    stem_to_path: dict[str, str] = {}
+
+    for md_file in sorted(note_root.rglob("*.md")):
+        rel_path = str(md_file.relative_to(note_root))
         try:
             content = md_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -85,7 +92,10 @@ def build_registry(vault_dir: Path, artifacts_dir: Path | None = None) -> Result
             "path": rel_path,
             "line_count": line_count,
             "headings": headings,
+            "outbound_links": [],
+            "inbound_links": 0,
         }
+        stem_to_path[md_file.stem] = rel_path
 
         # Copy frontmatter fields
         for field in ("source_file", "format", "category", "parent", "type", "status", "tags", "chapter"):
@@ -97,14 +107,60 @@ def build_registry(vault_dir: Path, artifacts_dir: Path | None = None) -> Result
             entry["summary"] = tldr
             indexed_fields.add("summary")
 
-        registry[rel_path] = entry
+        outbound = _extract_wikilinks(content)
+        entry["outbound_links"] = outbound
+        for target in outbound:
+            inbound_counts[Path(target).name] = inbound_counts.get(Path(target).name, 0) + 1
 
-    log(f"Indexed {len(registry)} notes with fields: {sorted(indexed_fields)}")
+        note_entries.append(entry)
+
+    for entry in note_entries:
+        entry["inbound_links"] = inbound_counts.get(Path(entry["path"]).stem, 0)
+
+    log(f"Indexed {len(note_entries)} notes with fields: {sorted(indexed_fields)}")
 
     result.outputs = {
-        "total_notes": len(registry),
+        "total_notes": len(note_entries),
         "indexed_fields": sorted(indexed_fields),
     }
+
+    registry: dict[str, Any] = {
+        "version": 2,
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "notes": note_entries,
+        "stats": {
+            "total_notes": len(note_entries),
+            "total_categories": len({entry.get("category") for entry in note_entries if entry.get("category")}),
+            "total_outputs": 0,
+            "total_sources": 0,
+        },
+    }
+
+    if kb_root is not None:
+        raw_sources_root = kb_root / "raw" / "sources"
+        outputs_root = kb_root / "outputs"
+        raw_sources = []
+        if raw_sources_root.is_dir():
+            raw_sources = [
+                {
+                    "path": path.relative_to(kb_root).as_posix(),
+                    "hash": "",
+                }
+                for path in sorted(raw_sources_root.rglob("*.md"))
+            ]
+        output_artifacts = []
+        if outputs_root.is_dir():
+            for path in sorted(outputs_root.rglob("*.md")):
+                output_artifacts.append({
+                    "path": path.relative_to(kb_root).as_posix(),
+                    "kind": path.parent.name,
+                })
+        registry["sources"] = raw_sources
+        registry["outputs"] = output_artifacts
+        registry["stats"]["total_sources"] = len(raw_sources)
+        registry["stats"]["total_outputs"] = len(output_artifacts)
+        result.outputs["total_sources"] = len(raw_sources)
+        result.outputs["total_outputs"] = len(output_artifacts)
 
     target_dir = artifacts_dir or vault_dir / ".kb-artifacts"
     result.save_artifact("vault_registry", registry, target_dir)

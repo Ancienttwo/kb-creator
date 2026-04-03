@@ -1,23 +1,42 @@
 ---
 name: kb-creator
 description: |
-  Agent-first knowledge base creator for Obsidian vaults. Orchestrates the full pipeline:
-  scan source documents → convert to markdown → split large files → tag and group →
-  inject wiki links → generate summaries → build registry.
+  CLI-first knowledge base builder for Obsidian-first markdown repos. The primary surface is the
+  top-level `kb` CLI: init → ingest → compile → link → health → query → registry/status.
+  The Skill is a thin orchestration layer over that CLI for agent workflows.
   Use when asked to "create knowledge base", "build vault from documents", "convert docs to Obsidian",
   "知识库", "文档转换", "建 vault", or "KB from source files".
-  Do not use for: single note editing, small-scale summarization, or vault querying.
+  Do not use for: single note editing, small-scale summarization, or ad-hoc vault querying without
+  repository setup/maintenance.
 ---
 
 # kb-creator
 
-Agent-first knowledge base creation skill. Converts source documents into a structured Obsidian vault with chapters, tags, wiki links, summaries, and a searchable registry.
+Thin agent wrapper over the `kb` CLI. The product surface is now the CLI; the Skill chooses commands, batches model work when needed, and preserves the JSON contracts.
 
 ## Architecture
 
-- **Skill (this file)** = orchestration layer. Makes decisions, calls model for summaries, asks user questions.
-- **CLI tools (`bin/`)** = execution layer. Non-interactive, JSON-only stdout, logs to stderr.
-- **All intermediate artifacts** persist to `<output_dir>/.kb-artifacts/` for recovery and multi-agent collaboration.
+- **Top-level CLI (`bin/kb.py` / `kb`)** = product surface for KB repositories.
+- **Low-level CLI tools (`bin/kb-*.py`)** = stable stage commands kept for compatibility and fine-grained agent orchestration.
+- **Skill (this file)** = orchestration layer that decides which CLI commands to run and when to involve a model.
+- **All intermediate artifacts** persist inside the KB root, especially `.kb-artifacts/` and `.kb-state.json`.
+
+## CLI vs Skill
+
+This project is **CLI-first**.
+
+- The **CLI is the source of truth** for product behavior.
+- The **Skill teaches an agent how to use the CLI**.
+- If a capability can be expressed cleanly as a deterministic `kb` command, prefer the CLI.
+- The Skill should only add orchestration that is awkward or impossible to encode in the CLI contract.
+
+Default decision rule:
+
+1. Try the top-level `kb` CLI first.
+2. Use low-level `kb-*` commands only when the top-level command is too coarse.
+3. Use Skill-only logic only for model-dependent orchestration, batching, or policy decisions.
+
+The Skill must not become a second product surface with behavior that drifts away from the CLI.
 
 ## Prerequisites
 
@@ -59,127 +78,116 @@ This skill accepts a structured task object. If parameters are provided, use the
 | `summary_mode` | No | `extract` | `extract` (candidates only) or `generate` (model TLDR) |
 | `resume` | No | `true` | Check `.kb-state.json` for recovery |
 
-## Workflow
+## Preferred Workflow
 
-### Phase 0: Environment & Discovery
+The Skill should default to the top-level CLI. Treat the CLI as the product API and the Skill as usage guidance for agents.
 
-1. **Check dependencies**:
-   ```bash
-   ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-convert.py --check-deps
-   ```
-   Parse the JSON result. If `missing` array is non-empty, output installation commands and ask the calling agent to execute them.
-
-2. **Check for existing state** (if `resume: true`):
-   Read `<output_dir>/.kb-state.json`. If exists, report progress and ask: continue or restart?
-
-3. **Scan source directory**:
-   ```bash
-   ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-scan.py <source_dir> --artifacts-dir <output_dir>/.kb-artifacts
-   ```
-   Parse scan_report.json. Present summary to user:
-   - Total files by format
-   - Language detected
-   - Suggested grouping strategy
-   - Large files that need splitting
-
-4. **Confirm parameters**: If `grouping_strategy: auto`, use the scan suggestions. If user wants manual grouping, ask for category assignments.
-
-5. **Initialize state**: Write `.kb-state.json` with all parameters.
-
-### Phase 1: Conversion
-
-For each source file (or batch):
+### Phase 0: Initialize KB
 
 ```bash
-${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-convert.py <input> <output_dir>/converted --enhance-tables --artifacts-dir <output_dir>/.kb-artifacts
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py init <kb_root>
 ```
 
-Parse the convert_report. For each file:
-- `status: "converted"` → proceed
-- `status: "needs_provider"` → warn user, skip (don't block pipeline)
-- `status: "quality_issues"` → report issues, let user decide
+This creates:
 
-Update `.kb-state.json` after each batch.
+- `raw/`
+- `wiki/`
+- `outputs/`
+- `.kb-artifacts/`
+- `.kb-state.json`
 
-### Phase 2: Structuring
+### Phase 1: Ingest
 
-1. **Identify files needing splitting**: Check convert_report for files exceeding the line threshold (default: 2000 lines).
+```bash
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py ingest <kb_root> <source_dir>
+```
 
-2. **Detect splitting patterns**: Read the converted markdown files and analyze heading structure. Load `${CLAUDE_SKILL_DIR}/references/splitting-patterns.md` for pattern matching.
+This normalizes source docs into `raw/sources/`.
 
-3. **Generate split config** per file or use user-provided `split_config`.
+### Phase 2: Compile
 
-4. **Execute splitting**:
-   ```bash
-   ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-split.py <input.md> <output_dir>/vault --config <split-config.json> --artifacts-dir <output_dir>/.kb-artifacts
-   ```
+```bash
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py compile <kb_root>
+```
 
-5. **Organize into categories**: Move files into category subdirectories based on grouping strategy.
+This incrementally updates:
 
-6. **Inject frontmatter**: Ensure each note has YAML frontmatter per `${CLAUDE_SKILL_DIR}/references/frontmatter-schema.md`.
+- `wiki/summaries/`
+- `wiki/concepts/`
+- `wiki/indexes/`
 
-Update `.kb-state.json`.
+### Phase 3: Operate
 
-### Phase 3: Linking
+Use as needed:
 
-1. **Dry-run first**:
-   ```bash
-   ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-link.py <vault_dir> --mode both --dry-run --artifacts-dir <output_dir>/.kb-artifacts
-   ```
-   Review the patch plan. Check link counts are reasonable.
+```bash
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py link <kb_root>
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py health <kb_root>
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py query <kb_root> --question "..."
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py registry <kb_root>
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py status <kb_root>
+```
 
-2. **Execute linking**:
-   ```bash
-   ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-link.py <vault_dir> --mode both --artifacts-dir <output_dir>/.kb-artifacts
-   ```
+## What The Skill Owns
 
-3. **Verify**: Check link_report for warnings or anomalies.
+The Skill is allowed to do these things on top of the CLI:
 
-Update `.kb-state.json`.
+- choose command order and recovery strategy
+- decide when to rerun `compile`, `health`, or `registry`
+- batch summary generation or other model calls around CLI artifacts
+- translate user intent into CLI parameters and follow-up operations
+- decide when a low-level `kb-*` command is safer than the top-level command
 
-### Phase 4: Summaries & Registry
+The Skill should not reimplement the KB repository lifecycle in chat when a `kb` command already exists.
 
-1. **Extract summary candidates**:
-   ```bash
-   ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-summary.py <vault_dir> --extract --artifacts-dir <output_dir>/.kb-artifacts
-   ```
+## Low-Level Fallbacks
 
-2. **Generate TLDR summaries** (if `summary_mode: generate`):
-   - Read `all_summaries.json`
-   - For each candidate, use model capabilities to generate a one-line TLDR
-   - Write summaries back to `all_summaries.json` with `summary` field populated
-   - Process in batches to manage context
+The old `kb-*` commands are still supported, but they are **fallback tools**, not a second primary workflow.
 
-3. **Inject summaries**:
-   ```bash
-   ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-summary.py <vault_dir> --inject <output_dir>/.kb-artifacts/all_summaries.json --format callout
-   ```
+Use them only when one of these is true:
 
-4. **Build registry**:
-   ```bash
-   ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-registry.py <vault_dir> --artifacts-dir <output_dir>/.kb-artifacts
-   ```
+- the top-level `kb` command is too coarse for the requested operation
+- an agent needs stage-by-stage inspection of JSON artifacts
+- a model-dependent step must be inserted between low-level stages
+- debugging requires isolating a single stage
 
-5. **Generate topic aliases** (Skill responsibility):
-   Analyze categories and tags to produce `topic_aliases.yml` with simplified/traditional Chinese and English synonyms. Write to `<vault_dir>/topic_aliases.yml`.
+Preferred fallback commands:
 
-Update `.kb-state.json`.
+- dependency check:
+  ```bash
+  ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-convert.py --check-deps
+  ```
+- source scan:
+  ```bash
+  ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-scan.py <source_dir> --artifacts-dir <kb_root>/.kb-artifacts
+  ```
+- precise conversion:
+  ```bash
+  ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-convert.py <input> <kb_root>/raw/sources --enhance-tables --artifacts-dir <kb_root>/.kb-artifacts
+  ```
+- precise split:
+  ```bash
+  ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-split.py <input.md> <kb_root>/wiki --config <split-config.json> --artifacts-dir <kb_root>/.kb-artifacts
+  ```
+- precise link:
+  ```bash
+  ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-link.py <kb_root>/wiki --mode both --artifacts-dir <kb_root>/.kb-artifacts
+  ```
+- summary extract/inject:
+  ```bash
+  ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-summary.py <kb_root>/wiki --extract --artifacts-dir <kb_root>/.kb-artifacts
+  ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-summary.py <kb_root>/wiki --inject <kb_root>/.kb-artifacts/all_summaries.json --format callout
+  ```
+- registry rebuild:
+  ```bash
+  ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-registry.py <kb_root> --artifacts-dir <kb_root>/.kb-artifacts
+  ```
 
-### Phase 5: Obsidian Views & Completion
+When using these fallbacks, the Skill should still preserve the CLI-first mental model:
 
-1. **Generate Base view** (if vault has Obsidian Bases support):
-   Use `${CLAUDE_SKILL_DIR}/templates/base-view.template.yaml` as reference to create a `.base` file in the vault's `Bases/` folder.
-
-2. **Generate progress dashboard**:
-   Use `${CLAUDE_SKILL_DIR}/templates/progress.template.md` to create a progress overview note.
-
-3. **Generate homepage MOC**:
-   Create a `首页.md` or `index.md` linking all category MOCs.
-
-4. **Final report**:
-   Summarize: total files, categories, notes, links, summaries, quality issues.
-
-5. Mark `.kb-state.json` phase as `done`.
+1. low-level commands refine or inspect the main `kb` workflow
+2. low-level commands do not define a separate product lifecycle
+3. if repeated fallback usage becomes common, that capability should probably graduate into the top-level `kb` CLI
 
 ## Error Handling
 
@@ -207,4 +215,4 @@ Load these lazily (only when the corresponding phase needs them):
 - `${CLAUDE_SKILL_DIR}/references/quality-checks.md` — Phase 1
 - `${CLAUDE_SKILL_DIR}/references/obsidian-markdown.md` — Phase 3-5
 - `${CLAUDE_SKILL_DIR}/references/obsidian-bases.md` — Phase 5
-- `${CLAUDE_SKILL_DIR}/references/vault-architecture.md` — Phase 0, 3, 5
+- `${CLAUDE_SKILL_DIR}/references/vault-architecture.md` — repository layout decisions and wiki output shape
