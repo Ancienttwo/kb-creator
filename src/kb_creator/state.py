@@ -43,6 +43,10 @@ class KBState:
     provenance: dict[str, list[str]] = field(default_factory=dict)
     last_health_report: str = ""
     last_query_output: str = ""
+    last_query_sources: list[str] = field(default_factory=list)
+    last_filed_query: str = ""
+    last_compile_workset: str = ""
+    last_log_entry: str = ""
     created_at: str = ""
     updated_at: str = ""
 

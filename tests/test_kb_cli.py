@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -21,6 +22,12 @@ def test_init_kb_creates_layout(tmp_path):
     assert (kb_root / "wiki" / "concepts").is_dir()
     assert (kb_root / "outputs" / "qa").is_dir()
     assert (kb_root / ".kb-artifacts").is_dir()
+    assert (kb_root / "KB_SCHEMA.md").exists()
+    assert (kb_root / "wiki" / "log.md").exists()
+    assert (kb_root / "wiki" / "index.md").exists()
+    schema_text = (kb_root / "KB_SCHEMA.md").read_text(encoding="utf-8")
+    assert "obsidian-markdown" in schema_text
+    assert "Skill" in schema_text
 
     state = KBState.load(kb_root)
     assert state is not None
@@ -53,6 +60,48 @@ def test_ingest_compile_and_status(tmp_path):
     summary_files = list((kb_root / "wiki" / "summaries" / "research").glob("*.md"))
     assert len(summary_files) == 1
     assert list((kb_root / "wiki" / "concepts").glob("*.md"))
+
+
+def test_compile_emit_workset_only_for_dirty_sources(tmp_path):
+    kb_root = tmp_path / "kb"
+    src_root = tmp_path / "sources"
+    src_root.mkdir()
+    source_path = src_root / "notes.md"
+    source_path.write_text("# Notes\n\n## Topic\n\nInitial body.\n", encoding="utf-8")
+
+    init_kb(kb_root)
+    ingest_kb(kb_root, src_root)
+    first_compile = compile_kb(kb_root, emit_workset=True)
+
+    assert first_compile.ok
+    workset_path = Path(first_compile.artifacts["compile_workset"])
+    workset = json.loads(workset_path.read_text(encoding="utf-8"))
+    assert len(workset["sources"]) == 1
+    assert workset["sources"][0]["summary_page"].startswith("wiki/summaries/")
+
+    summary_path = kb_root / workset["sources"][0]["summary_page"]
+    first_mtime = summary_path.stat().st_mtime
+    time.sleep(1.1)
+
+    second_compile = compile_kb(kb_root, emit_workset=True)
+    second_workset = json.loads(Path(second_compile.artifacts["compile_workset"]).read_text(encoding="utf-8"))
+    assert second_compile.outputs["updated_summaries"] == 0
+    assert second_compile.outputs["skipped_sources"] == 1
+    assert second_workset["sources"] == []
+    assert summary_path.stat().st_mtime == first_mtime
+
+    source_path.write_text("# Notes\n\n## Topic\n\nChanged body.\n", encoding="utf-8")
+    ingest_kb(kb_root, src_root)
+    time.sleep(1.1)
+    third_compile = compile_kb(kb_root, emit_workset=True)
+    third_workset = json.loads(Path(third_compile.artifacts["compile_workset"]).read_text(encoding="utf-8"))
+    state = KBState.load(kb_root)
+
+    assert third_compile.outputs["updated_summaries"] == 1
+    assert len(third_workset["sources"]) == 1
+    assert "wiki/index.md" in state.files["notes.md"]["artifacts"]
+    assert state.last_compile_workset == ".kb-artifacts/compile_workset.json"
+    assert "compile |" in state.last_log_entry
 
 
 def test_top_level_cli_emits_json(tmp_path):

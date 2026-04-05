@@ -1,6 +1,6 @@
 """Top-level KB repository operations.
 
-These functions power the new ``kb`` CLI while preserving the lower-level
+These functions power the ``kb`` CLI while preserving the lower-level
 stage commands in ``bin/kb-*.py``.
 """
 
@@ -15,17 +15,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kb_creator.contracts import Result, log
+from kb_creator.contracts import Result
 from kb_creator.converter import convert_file
 from kb_creator.linker import link as link_wiki
 from kb_creator.registry import build_registry
 from kb_creator.scanner import scan
 from kb_creator.state import KBState
 from kb_creator.summarizer import extract as extract_summaries, inject as inject_summaries
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from kb_creator.wiki_ops import (
+    append_log_entry,
+    refresh_wiki_index,
+    render_kb_schema,
+    summarize_markdown,
+)
 
 
 def _path_slug(path: Path) -> str:
@@ -145,6 +147,17 @@ def _yaml_quote(text: str) -> str:
     return '"' + text.replace('"', '\\"') + '"'
 
 
+def _unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
 @dataclass(frozen=True)
 class KBLayout:
     """Canonical KB repository layout."""
@@ -180,6 +193,14 @@ class KBLayout:
         return self.wiki_dir / "indexes"
 
     @property
+    def wiki_queries_dir(self) -> Path:
+        return self.wiki_dir / "queries"
+
+    @property
+    def wiki_log_path(self) -> Path:
+        return self.wiki_dir / "log.md"
+
+    @property
     def outputs_dir(self) -> Path:
         return self.root / "outputs"
 
@@ -195,6 +216,10 @@ class KBLayout:
     def artifacts_dir(self) -> Path:
         return self.root / ".kb-artifacts"
 
+    @property
+    def kb_schema_path(self) -> Path:
+        return self.root / "KB_SCHEMA.md"
+
 
 def _ensure_layout(layout: KBLayout) -> None:
     for path in (
@@ -203,11 +228,21 @@ def _ensure_layout(layout: KBLayout) -> None:
         layout.wiki_summaries_dir,
         layout.wiki_concepts_dir,
         layout.wiki_indexes_dir,
+        layout.wiki_queries_dir,
         layout.outputs_qa_dir,
         layout.outputs_health_dir,
         layout.artifacts_dir,
     ):
         path.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_static_files(layout: KBLayout) -> None:
+    if not layout.kb_schema_path.exists():
+        layout.kb_schema_path.write_text(render_kb_schema(), encoding="utf-8")
+    if not layout.wiki_log_path.exists():
+        layout.wiki_log_path.write_text("# KB Log\n\n", encoding="utf-8")
+    if not (layout.wiki_dir / "index.md").exists():
+        refresh_wiki_index(layout.root, layout.wiki_dir, schema_path=layout.kb_schema_path)
 
 
 def _load_state(layout: KBLayout) -> KBState:
@@ -232,10 +267,115 @@ def _load_state(layout: KBLayout) -> KBState:
     return state
 
 
+def _write_sources_index(layout: KBLayout, source_rows: list[tuple[str, str, str]]) -> Path:
+    sources_index = [
+        "---",
+        'type: "index"',
+        'index_kind: "sources"',
+        "---",
+        "",
+        "# All Sources",
+        "",
+    ]
+    for title, raw_path, summary_path in sorted(source_rows):
+        sources_index.append(f"- [[{Path(summary_path).with_suffix('').as_posix()}|{title}]] (`{raw_path}`)")
+    index_path = layout.wiki_indexes_dir / "all-sources.md"
+    index_path.write_text("\n".join(sources_index) + "\n", encoding="utf-8")
+    return index_path
+
+
+def _write_concepts_index(layout: KBLayout, concept_rows: list[tuple[str, str]]) -> Path:
+    concepts_index = [
+        "---",
+        'type: "index"',
+        'index_kind: "concepts"',
+        "---",
+        "",
+        "# All Concepts",
+        "",
+    ]
+    for title, rel_path in concept_rows:
+        concepts_index.append(f"- [[{Path(rel_path).with_suffix('').as_posix()}|{title}]]")
+    index_path = layout.wiki_indexes_dir / "all-concepts.md"
+    index_path.write_text("\n".join(concepts_index) + "\n", encoding="utf-8")
+    return index_path
+
+
+def _pages_matching_terms(layout: KBLayout, terms: list[str], exclude: set[str]) -> list[str]:
+    matched: list[str] = []
+    lowered_terms = [term.casefold() for term in terms if term]
+    for note_path in sorted(layout.wiki_dir.rglob("*.md")):
+        rel_path = note_path.relative_to(layout.root).as_posix()
+        if rel_path in exclude:
+            continue
+        content = note_path.read_text(encoding="utf-8", errors="replace").casefold()
+        stem = note_path.stem.casefold()
+        for term in lowered_terms:
+            if term and (term in content or term in stem):
+                matched.append(rel_path)
+                break
+    return matched
+
+
+def _build_workset_entry(
+    layout: KBLayout,
+    state: KBState,
+    raw_rel: Path,
+    title: str,
+    headings: list[str],
+    category: str,
+    summary_rel: Path,
+    concept_rels: list[Path],
+    excerpt: str,
+) -> dict[str, Any]:
+    exclude = {
+        summary_rel.as_posix(),
+        "wiki/index.md",
+    }
+    category_pages = [
+        path.relative_to(layout.root).as_posix()
+        for path in sorted((layout.wiki_summaries_dir / category).glob("*.md"))
+        if path.relative_to(layout.root).as_posix() != summary_rel.as_posix()
+    ]
+    concept_pages = [path.as_posix() for path in concept_rels]
+    existing_concepts = [path for path in concept_pages if (layout.root / path).exists()]
+    matched_pages = _pages_matching_terms(
+        layout,
+        [title] + headings[:4],
+        exclude=exclude | set(category_pages) | set(existing_concepts),
+    )
+    recent_query_pages = list(state.last_query_sources)
+    if state.last_filed_query:
+        recent_query_pages.append(state.last_filed_query)
+    existing_pages = _unique(category_pages + existing_concepts + matched_pages + recent_query_pages)
+
+    evidence_snippets = [
+        {"kind": "title", "text": title},
+        {"kind": "excerpt", "text": excerpt[:280] or "_No summary candidate available._"},
+    ]
+    evidence_snippets.extend({"kind": "heading", "text": heading} for heading in headings[:4])
+
+    return {
+        "source_path": raw_rel.as_posix(),
+        "summary_page": summary_rel.as_posix(),
+        "candidate_concept_pages": concept_pages,
+        "existing_pages_to_review": existing_pages,
+        "evidence_snippets": evidence_snippets,
+        "actions": [
+            "refresh summary page",
+            "review related concept pages",
+            "check matched pages for contradictions or stale claims",
+            "consider whether the source unlocks a follow-up query note",
+        ],
+    }
+
+
 def init_kb(kb_root: Path) -> Result:
     """Initialize a KB repository layout."""
     layout = KBLayout(kb_root.resolve())
     _ensure_layout(layout)
+    _ensure_static_files(layout)
+    index_path = refresh_wiki_index(layout.root, layout.wiki_dir, schema_path=layout.kb_schema_path)
     state = _load_state(layout)
     state.phase = "init"
     state.save(layout.root)
@@ -249,6 +389,9 @@ def init_kb(kb_root: Path) -> Result:
             "outputs": str(layout.outputs_dir.relative_to(layout.root)),
             "artifacts": str(layout.artifacts_dir.relative_to(layout.root)),
         },
+        "schema_path": str(layout.kb_schema_path.relative_to(layout.root)),
+        "log_path": str(layout.wiki_log_path.relative_to(layout.root)),
+        "index_path": str(index_path.relative_to(layout.root)),
     }
     return result
 
@@ -257,6 +400,7 @@ def ingest_kb(kb_root: Path, source_dir: Path, enhance_tables: bool = False) -> 
     """Normalize source documents into ``raw/sources``."""
     layout = KBLayout(kb_root.resolve())
     _ensure_layout(layout)
+    _ensure_static_files(layout)
     state = _load_state(layout)
 
     result = Result(
@@ -273,6 +417,7 @@ def ingest_kb(kb_root: Path, source_dir: Path, enhance_tables: bool = False) -> 
     ingested = 0
     skipped = 0
     failures: list[str] = []
+    touched_sources: list[str] = []
 
     for entry in manifest:
         rel_source = Path(entry["path"])
@@ -309,11 +454,23 @@ def ingest_kb(kb_root: Path, source_dir: Path, enhance_tables: bool = False) -> 
                 produced.unlink()
 
         state.mark_ingested(rel_source.as_posix(), raw_rel.as_posix(), source_hash, category=category)
+        touched_sources.append(raw_rel.as_posix())
         ingested += 1
+
+    if touched_sources or failures:
+        state.last_log_entry = append_log_entry(
+            layout.wiki_log_path,
+            "ingest",
+            f"Ingested {ingested} sources",
+            touched_sources=touched_sources,
+            touched_pages=[],
+            warnings=failures,
+        )
 
     state.source_dir = str(source_dir.resolve())
     state.phase = "ingest"
     state.save(layout.root)
+    refresh_wiki_index(layout.root, layout.wiki_dir, schema_path=layout.kb_schema_path)
 
     result.outputs = {
         "ingested": ingested,
@@ -326,14 +483,19 @@ def ingest_kb(kb_root: Path, source_dir: Path, enhance_tables: bool = False) -> 
     return result
 
 
-def compile_kb(kb_root: Path, force: bool = False) -> Result:
+def compile_kb(kb_root: Path, force: bool = False, emit_workset: bool = False) -> Result:
     """Compile raw markdown into wiki summaries, concepts, and indexes."""
     layout = KBLayout(kb_root.resolve())
     _ensure_layout(layout)
+    _ensure_static_files(layout)
     state = _load_state(layout)
 
     raw_files = sorted(layout.raw_sources_dir.rglob("*.md"))
-    result = Result(ok=True, action="kb_compile", inputs={"kb_root": str(layout.root), "force": force})
+    result = Result(
+        ok=True,
+        action="kb_compile",
+        inputs={"kb_root": str(layout.root), "force": force, "emit_workset": emit_workset},
+    )
     if not raw_files:
         result.warnings.append("No raw markdown sources found under raw/sources.")
         return result
@@ -342,7 +504,12 @@ def compile_kb(kb_root: Path, force: bool = False) -> Result:
     updated = 0
     skipped = 0
     source_rows: list[tuple[str, str, str]] = []
+    workset_entries: list[dict[str, Any]] = []
+    per_source_artifacts: dict[str, list[str]] = {}
+    touched_pages: set[str] = set()
+    touched_sources: list[str] = []
 
+    source_snapshots: list[dict[str, Any]] = []
     for raw_file in raw_files:
         raw_rel = raw_file.relative_to(layout.root)
         source_key = next(
@@ -356,24 +523,50 @@ def compile_kb(kb_root: Path, force: bool = False) -> Result:
         category = _category_for(raw_file.relative_to(layout.raw_sources_dir))
         summary_key = _path_slug(raw_file.relative_to(layout.raw_sources_dir).with_suffix(""))
         summary_rel = Path("wiki") / "summaries" / category / f"{summary_key}.md"
+        excerpt = _first_paragraphs(text)
+        concepts = _concept_candidates(title, headings)
+        source_snapshots.append({
+            "source_key": source_key,
+            "raw_rel": raw_rel,
+            "source_hash": source_hash,
+            "title": title,
+            "headings": headings,
+            "category": category,
+            "summary_rel": summary_rel,
+            "excerpt": excerpt,
+            "concepts": concepts,
+        })
+
+    for snapshot in source_snapshots:
+        source_key = snapshot["source_key"]
+        raw_rel: Path = snapshot["raw_rel"]
+        source_hash = snapshot["source_hash"]
+        title = snapshot["title"]
+        headings = snapshot["headings"]
+        category = snapshot["category"]
+        summary_rel: Path = snapshot["summary_rel"]
+        excerpt = snapshot["excerpt"]
+        concepts: list[str] = snapshot["concepts"]
         summary_abs = layout.root / summary_rel
         summary_abs.parent.mkdir(parents=True, exist_ok=True)
 
         entry = state.files.get(source_key, {})
         artifacts = entry.get("artifacts", [])
-        if (
-            not force
-            and entry.get("hash") == source_hash
+        dirty = force or not (
+            entry.get("dirty") is False
+            and
+            entry.get("hash") == source_hash
             and summary_rel.as_posix() in artifacts
             and summary_abs.exists()
-        ):
+        )
+
+        if not dirty:
             skipped += 1
         else:
-            excerpt = _first_paragraphs(text)
             summary_body = [
                 "---",
                 f"title: {_yaml_quote(title)}",
-                f'type: "summary"',
+                'type: "summary"',
                 f"category: {_yaml_quote(category)}",
                 f"source_path: {_yaml_quote(raw_rel.as_posix())}",
                 f"source_key: {_yaml_quote(source_key)}",
@@ -397,20 +590,34 @@ def compile_kb(kb_root: Path, force: bool = False) -> Result:
             else:
                 summary_body.append("- _No headings detected_")
             summary_body.extend(["", "## Concepts", ""])
-
-            concepts = _concept_candidates(title, headings)
             if concepts:
                 for concept in concepts:
                     summary_body.append(f"- [[{concept}]]")
             else:
                 summary_body.append("- _No concepts extracted_")
-
             summary_abs.write_text("\n".join(summary_body) + "\n", encoding="utf-8")
             updated += 1
+            touched_sources.append(raw_rel.as_posix())
+            touched_pages.add(summary_rel.as_posix())
+
+            concept_rels = [Path("wiki") / "concepts" / f"{_slugify(concept)}.md" for concept in concepts]
+            workset_entries.append(
+                _build_workset_entry(
+                    layout,
+                    state,
+                    raw_rel,
+                    title,
+                    headings,
+                    category,
+                    summary_rel,
+                    concept_rels,
+                    excerpt,
+                )
+            )
 
         source_rows.append((title, raw_rel.as_posix(), summary_rel.as_posix()))
-
-        concepts = _concept_candidates(title, headings)
+        source_artifacts = per_source_artifacts.setdefault(source_key, [])
+        source_artifacts.append(summary_rel.as_posix())
         for concept in concepts:
             key = _slugify(concept)
             concept_entry = concept_map.setdefault(key, {"title": concept, "sources": [], "aliases": []})
@@ -418,8 +625,7 @@ def compile_kb(kb_root: Path, force: bool = False) -> Result:
                 concept_entry["aliases"].append(concept)
             if summary_rel.as_posix() not in concept_entry["sources"]:
                 concept_entry["sources"].append(summary_rel.as_posix())
-
-        state.mark_compiled(source_key, source_hash, [summary_rel.as_posix()])
+            source_artifacts.append((Path("wiki") / "concepts" / f"{key}.md").as_posix())
 
     concept_rows: list[tuple[str, str]] = []
     for key, concept in sorted(concept_map.items()):
@@ -443,46 +649,46 @@ def compile_kb(kb_root: Path, force: bool = False) -> Result:
         concept_body.extend(f"- [[{Path(source).with_suffix('').as_posix()}]]" for source in concept["sources"])
         concept_abs.write_text("\n".join(concept_body) + "\n", encoding="utf-8")
         concept_rows.append((concept["title"], concept_rel.as_posix()))
+        touched_pages.add(concept_rel.as_posix())
 
-    sources_index = [
-        "---",
-        'type: "index"',
-        'index_kind: "sources"',
-        "---",
-        "",
-        "# All Sources",
-        "",
-    ]
-    for title, raw_path, summary_path in sorted(source_rows):
-        sources_index.append(f"- [[{Path(summary_path).with_suffix('').as_posix()}|{title}]] (`{raw_path}`)")
-    (layout.wiki_indexes_dir / "all-sources.md").write_text("\n".join(sources_index) + "\n", encoding="utf-8")
+    sources_index = _write_sources_index(layout, source_rows)
+    concepts_index = _write_concepts_index(layout, concept_rows)
+    index_path = refresh_wiki_index(layout.root, layout.wiki_dir, schema_path=layout.kb_schema_path)
+    touched_pages.update({
+        sources_index.relative_to(layout.root).as_posix(),
+        concepts_index.relative_to(layout.root).as_posix(),
+        index_path.relative_to(layout.root).as_posix(),
+    })
 
-    concepts_index = [
-        "---",
-        'type: "index"',
-        'index_kind: "concepts"',
-        "---",
-        "",
-        "# All Concepts",
-        "",
+    global_pages = [
+        sources_index.relative_to(layout.root).as_posix(),
+        concepts_index.relative_to(layout.root).as_posix(),
+        index_path.relative_to(layout.root).as_posix(),
     ]
-    for title, rel_path in concept_rows:
-        concepts_index.append(f"- [[{Path(rel_path).with_suffix('').as_posix()}|{title}]]")
-    (layout.wiki_indexes_dir / "all-concepts.md").write_text("\n".join(concepts_index) + "\n", encoding="utf-8")
+    if emit_workset:
+        result.save_artifact("compile_workset", {"sources": workset_entries}, layout.artifacts_dir)
+        state.last_compile_workset = str(Path(result.artifacts["compile_workset"]).relative_to(layout.root))
+        global_pages.append(state.last_compile_workset)
 
-    home = [
-        "---",
-        'type: "index"',
-        'index_kind: "homepage"',
-        "---",
-        "",
-        "# Knowledge Base",
-        "",
-        "- [[indexes/all-sources|All Sources]]",
-        "- [[indexes/all-concepts|All Concepts]]",
-        "",
+    for snapshot in source_snapshots:
+        source_key = snapshot["source_key"]
+        source_hash = snapshot["source_hash"]
+        source_artifacts = _unique(per_source_artifacts.get(source_key, []) + global_pages)
+        state.mark_compiled(source_key, source_hash, source_artifacts)
+
+    next_questions = [
+        f"Should an agent review {entry['summary_page']} and {len(entry['existing_pages_to_review'])} related pages?"
+        for entry in workset_entries[:3]
     ]
-    (layout.wiki_dir / "index.md").write_text("\n".join(home), encoding="utf-8")
+    if touched_sources or emit_workset:
+        state.last_log_entry = append_log_entry(
+            layout.wiki_log_path,
+            "compile",
+            f"Compiled {updated} updated, {skipped} skipped sources",
+            touched_sources=touched_sources,
+            touched_pages=sorted(touched_pages),
+            next_questions=next_questions,
+        )
 
     state.phase = "compile"
     state.save(layout.root)
@@ -492,11 +698,8 @@ def compile_kb(kb_root: Path, force: bool = False) -> Result:
         "updated_summaries": updated,
         "skipped_sources": skipped,
         "concepts": len(concept_map),
-        "indexes": [
-            "wiki/index.md",
-            "wiki/indexes/all-sources.md",
-            "wiki/indexes/all-concepts.md",
-        ],
+        "indexes": global_pages[:3],
+        "workset_sources": len(workset_entries),
     }
     return result
 
@@ -505,6 +708,7 @@ def link_kb(kb_root: Path, mode: str = "both", dry_run: bool = False) -> Result:
     """Run wiki linking against the compiled wiki directory."""
     layout = KBLayout(kb_root.resolve())
     _ensure_layout(layout)
+    _ensure_static_files(layout)
     return link_wiki(layout.wiki_dir, mode=mode, dry_run=dry_run, artifacts_dir=layout.artifacts_dir)
 
 
@@ -517,6 +721,7 @@ def summarize_kb(
     """Dispatch summary extract/inject against the compiled wiki."""
     layout = KBLayout(kb_root.resolve())
     _ensure_layout(layout)
+    _ensure_static_files(layout)
     if extract:
         return extract_summaries(layout.wiki_dir, artifacts_dir=layout.artifacts_dir)
     if inject_path is not None:
@@ -528,6 +733,7 @@ def registry_kb(kb_root: Path) -> Result:
     """Build an expanded registry from the KB root."""
     layout = KBLayout(kb_root.resolve())
     _ensure_layout(layout)
+    _ensure_static_files(layout)
     state = _load_state(layout)
     result = build_registry(layout.root, artifacts_dir=layout.artifacts_dir)
     state.phase = "registry"
@@ -539,12 +745,14 @@ def status_kb(kb_root: Path) -> Result:
     """Return KB repository counts and resumable state."""
     layout = KBLayout(kb_root.resolve())
     _ensure_layout(layout)
+    _ensure_static_files(layout)
     state = _load_state(layout)
 
     raw_count = len(list(layout.raw_sources_dir.rglob("*.md")))
     wiki_count = len(list(layout.wiki_dir.rglob("*.md")))
     qa_count = len(list(layout.outputs_qa_dir.glob("*.md")))
-    health_count = len(list(layout.outputs_health_dir.glob("*.md")))
+    health_count = len(list(layout.outputs_health_dir.glob("health-*.md")))
+    lint_count = len(list(layout.outputs_health_dir.glob("lint-*.md")))
     dirty = sum(1 for meta in state.files.values() if meta.get("dirty"))
 
     result = Result(ok=True, action="kb_status", inputs={"kb_root": str(layout.root)})
@@ -554,10 +762,16 @@ def status_kb(kb_root: Path) -> Result:
         "wiki_notes": wiki_count,
         "qa_outputs": qa_count,
         "health_reports": health_count,
+        "lint_reports": lint_count,
         "tracked_sources": len(state.files),
         "dirty_sources": dirty,
         "last_health_report": state.last_health_report,
         "last_query_output": state.last_query_output,
+        "last_filed_query": state.last_filed_query,
+        "last_compile_workset": state.last_compile_workset,
+        "last_log_entry": state.last_log_entry,
+        "schema_path": str(layout.kb_schema_path.relative_to(layout.root)),
+        "log_path": str(layout.wiki_log_path.relative_to(layout.root)),
         "progress": state.progress_summary(),
     }
     return result

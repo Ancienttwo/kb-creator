@@ -6,57 +6,18 @@ index (`vault_registry.json`) for agent retrieval and navigation.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from kb_creator.contracts import Result, log
-
-
-def _parse_frontmatter(content: str) -> dict[str, Any]:
-    """Extract YAML frontmatter from markdown content."""
-    if not content.startswith("---"):
-        return {}
-    end = content.find("---", 3)
-    if end == -1:
-        return {}
-    fm_text = content[3:end].strip()
-    result: dict[str, Any] = {}
-    for line in fm_text.split("\n"):
-        if ":" in line:
-            key, _, value = line.partition(":")
-            key = key.strip()
-            value = value.strip().strip("\"'")
-            if value.startswith("[") and value.endswith("]"):
-                value = [v.strip().strip("\"'") for v in value[1:-1].split(",") if v.strip()]
-            result[key] = value
-    return result
-
-
-def _extract_tldr(content: str) -> str:
-    """Extract TLDR callout text from note content."""
-    match = re.search(r"> \[!tldr\]\s*\n((?:>.*\n)*)", content, re.IGNORECASE)
-    if not match:
-        return ""
-    lines = match.group(1).strip().split("\n")
-    return " ".join(line.lstrip("> ").strip() for line in lines if line.strip())
-
-
-def _extract_headings(content: str) -> list[str]:
-    """Extract top-level headings from content."""
-    headings: list[str] = []
-    for line in content.split("\n"):
-        if line.startswith("# ") or line.startswith("## "):
-            heading = line.lstrip("#").strip()
-            if heading:
-                headings.append(heading)
-    return headings[:10]  # Cap at 10
-
-
-def _extract_wikilinks(content: str) -> list[str]:
-    """Extract wikilink targets from note content."""
-    return [match.group(1).split("|", 1)[0].split("#", 1)[0].strip() for match in re.finditer(r"\[\[([^\]]+)\]\]", content)]
+from kb_creator.wiki_ops import (
+    extract_headings,
+    extract_wikilinks,
+    parse_frontmatter,
+    parse_log_entries,
+    summarize_markdown,
+)
 
 
 def build_registry(vault_dir: Path, artifacts_dir: Path | None = None) -> Result:
@@ -72,7 +33,8 @@ def build_registry(vault_dir: Path, artifacts_dir: Path | None = None) -> Result
     note_entries: list[dict[str, Any]] = []
     indexed_fields = set()
     inbound_counts: dict[str, int] = {}
-    stem_to_path: dict[str, str] = {}
+    page_sources: dict[str, list[str]] = {}
+    source_pages: dict[str, list[str]] = {}
 
     for md_file in sorted(note_root.rglob("*.md")):
         rel_path = str(md_file.relative_to(note_root))
@@ -82,35 +44,43 @@ def build_registry(vault_dir: Path, artifacts_dir: Path | None = None) -> Result
             result.warnings.append(f"Could not read: {rel_path}")
             continue
 
-        fm = _parse_frontmatter(content)
-        tldr = _extract_tldr(content)
-        headings = _extract_headings(content)
+        fm = parse_frontmatter(content)
+        headings = extract_headings(content)
         line_count = content.count("\n") + 1
+        page_summary = summarize_markdown(content, max_chars=220)
 
         entry: dict[str, Any] = {
-            "title": md_file.stem,
+            "title": str(fm.get("title", md_file.stem)),
             "path": rel_path,
             "line_count": line_count,
             "headings": headings,
             "outbound_links": [],
             "inbound_links": 0,
+            "summary": page_summary,
         }
-        stem_to_path[md_file.stem] = rel_path
 
-        # Copy frontmatter fields
-        for field in ("source_file", "format", "category", "parent", "type", "status", "tags", "chapter"):
+        for field in ("source_file", "format", "category", "parent", "type", "status", "tags", "chapter", "source_path", "question"):
             if field in fm:
                 entry[field] = fm[field]
                 indexed_fields.add(field)
 
-        if tldr:
-            entry["summary"] = tldr
-            indexed_fields.add("summary")
-
-        outbound = _extract_wikilinks(content)
+        outbound = extract_wikilinks(content)
         entry["outbound_links"] = outbound
         for target in outbound:
             inbound_counts[Path(target).name] = inbound_counts.get(Path(target).name, 0) + 1
+
+        sources: list[str] = []
+        source_path = fm.get("source_path")
+        if isinstance(source_path, str) and source_path:
+            sources.append(source_path)
+        fm_sources = fm.get("sources")
+        if isinstance(fm_sources, list):
+            sources.extend(str(item) for item in fm_sources if item)
+        if isinstance(fm_sources, str) and fm_sources:
+            sources.append(fm_sources)
+        page_sources[rel_path] = sorted(set(sources))
+        for source in page_sources[rel_path]:
+            source_pages.setdefault(source, []).append(rel_path)
 
         note_entries.append(entry)
 
@@ -125,14 +95,19 @@ def build_registry(vault_dir: Path, artifacts_dir: Path | None = None) -> Result
     }
 
     registry: dict[str, Any] = {
-        "version": 2,
+        "version": 3,
         "generated": datetime.now(timezone.utc).isoformat(),
         "notes": note_entries,
+        "page_sources": page_sources,
+        "source_pages": source_pages,
+        "query_outputs": [],
+        "log_entries": [],
         "stats": {
             "total_notes": len(note_entries),
             "total_categories": len({entry.get("category") for entry in note_entries if entry.get("category")}),
             "total_outputs": 0,
             "total_sources": 0,
+            "total_log_entries": 0,
         },
     }
 
@@ -149,16 +124,29 @@ def build_registry(vault_dir: Path, artifacts_dir: Path | None = None) -> Result
                 for path in sorted(raw_sources_root.rglob("*.md"))
             ]
         output_artifacts = []
+        query_outputs = []
         if outputs_root.is_dir():
             for path in sorted(outputs_root.rglob("*.md")):
                 output_artifacts.append({
                     "path": path.relative_to(kb_root).as_posix(),
                     "kind": path.parent.name,
                 })
+                if path.parent.name == "qa":
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                    fm = parse_frontmatter(content)
+                    query_outputs.append({
+                        "path": path.relative_to(kb_root).as_posix(),
+                        "question": fm.get("question", ""),
+                        "mode": fm.get("mode", ""),
+                        "sources": fm.get("sources", []),
+                    })
         registry["sources"] = raw_sources
         registry["outputs"] = output_artifacts
+        registry["query_outputs"] = query_outputs
+        registry["log_entries"] = parse_log_entries(kb_root / "wiki" / "log.md")
         registry["stats"]["total_sources"] = len(raw_sources)
         registry["stats"]["total_outputs"] = len(output_artifacts)
+        registry["stats"]["total_log_entries"] = len(registry["log_entries"])
         result.outputs["total_sources"] = len(raw_sources)
         result.outputs["total_outputs"] = len(output_artifacts)
 
