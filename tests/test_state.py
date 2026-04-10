@@ -63,3 +63,16 @@ def test_state_timestamps(tmp_path):
 
     raw = json.loads((tmp_path / ".kb-state.json").read_text())
     assert "T" in raw["created_at"]  # ISO format
+
+
+def test_source_layer_status_defaults_and_updates(tmp_path):
+    state = KBState(source_dir="/test")
+    assert state.source_layer_status["split_complete"] is False
+    state.update_source_layer_status(split_complete=True, patches_pending=True)
+    state.save(tmp_path)
+
+    loaded = KBState.load(tmp_path)
+    assert loaded is not None
+    assert loaded.source_layer_status["split_complete"] is True
+    assert loaded.source_layer_status["patches_pending"] is True
+    assert loaded.source_layer_status["qa_verified"] is False

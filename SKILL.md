@@ -109,6 +109,13 @@ ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py registry <kb_
 ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py status <kb_root>
 ```
 
+For source-layer cleanup flows that stop before wiki generation, use the low-level source-layout runtime:
+
+```bash
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-source-qa.py <source_dir> --artifacts-dir <source_dir>/.kb-artifacts
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-source-apply.py <source_dir> --queue <source_dir>/.kb-artifacts/layout_patch_queue.json --candidates <source_dir>/.kb-artifacts/layout_candidates.json --overrides <source_dir>/.kb-artifacts/layout_overrides.json
+```
+
 ### Phase 2: Apply Obsidian Writing Contract
 
 When the workflow needs to create or rewrite wiki pages:
@@ -118,6 +125,38 @@ When the workflow needs to create or rewrite wiki pages:
 - do not emit free-form wiki mutations unless the dependency Skill is active
 - use deterministic CLI artifacts (`compile_workset.json`, `lint_report.json`, query outputs) as the source of truth for what to change
 
+For source-layer refinement, do not ask AI to rewrite whole chapters. The contract is:
+
+- runtime detects risky fragments and emits `layout_candidates.json`
+- AI only sees local candidate context, never the whole book
+- AI returns structured JSON patch suggestions into `layout_patch_queue.json`
+- approved patches are persisted in `layout_overrides.json`
+- runtime applies overrides deterministically; re-runs must preserve the same source-layer fixes
+
+Allowed risk types:
+
+- `table_fragment`
+- `chart_block`
+- `short_column_relation`
+- `heading_break`
+- `list_fragment`
+- `running_header_noise`
+
+Allowed patch operations:
+
+- `replace_block`
+- `wrap_code_block`
+- `replace_with_table`
+- `join_lines`
+- `drop_noise_lines`
+
+AI source-layer constraints:
+
+- never return full rewritten chapter markdown
+- never invent content not present in the source excerpt
+- never patch across chapter boundaries
+- always target a single `candidate_id`
+
 ### Phase 3: Post-Mutation Validation
 
 After any Skill-driven note changes:
@@ -125,6 +164,12 @@ After any Skill-driven note changes:
 - re-run `kb lint`
 - re-run `kb registry`
 - update the KB only through managed files and persisted artifacts
+
+After source-layer patch application:
+
+- re-run `kb-source-qa.py`
+- confirm candidate count decreases or stays flat with no new high-confidence anomalies
+- keep `layout_overrides.json` as the long-term repair truth instead of hand-editing generated chapters
 
 ## Recovery
 

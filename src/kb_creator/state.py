@@ -16,6 +16,17 @@ from dataclasses import dataclass, field
 
 
 STATE_FILENAME = ".kb-state.json"
+SOURCE_LAYER_STAGES = (
+    "split_complete",
+    "layout_qa_complete",
+    "patches_pending",
+    "patches_applied",
+    "qa_verified",
+)
+
+
+def _default_source_layer_status() -> dict[str, bool]:
+    return {stage: False for stage in SOURCE_LAYER_STAGES}
 
 
 @dataclass
@@ -47,6 +58,7 @@ class KBState:
     last_filed_query: str = ""
     last_compile_workset: str = ""
     last_log_entry: str = ""
+    source_layer_status: dict[str, bool] = field(default_factory=_default_source_layer_status)
     created_at: str = ""
     updated_at: str = ""
 
@@ -69,6 +81,7 @@ class KBState:
         self.updated_at = datetime.now(timezone.utc).isoformat()
         if not self.created_at:
             self.created_at = self.updated_at
+        self.ensure_source_layer_status()
         data = {
             k: v for k, v in self.__dict__.items()
             if not k.startswith("_")
@@ -136,3 +149,24 @@ class KBState:
             s = v.get("status", "unknown")
             counts[s] = counts.get(s, 0) + 1
         return counts
+
+    def ensure_source_layer_status(self) -> dict[str, bool]:
+        """Backfill source-layer status flags introduced after v2."""
+        current = dict(self.source_layer_status or {})
+        for stage in SOURCE_LAYER_STAGES:
+            current.setdefault(stage, False)
+        self.source_layer_status = current
+        return current
+
+    def mark_source_layer_stage(self, stage: str, value: bool = True) -> None:
+        """Update one source-layer stage flag."""
+        if stage not in SOURCE_LAYER_STAGES:
+            raise ValueError(f"unknown source-layer stage: {stage}")
+        self.ensure_source_layer_status()
+        self.source_layer_status[stage] = value
+
+    def update_source_layer_status(self, **updates: bool) -> None:
+        """Apply multiple source-layer status updates at once."""
+        self.ensure_source_layer_status()
+        for stage, value in updates.items():
+            self.mark_source_layer_stage(stage, value)
