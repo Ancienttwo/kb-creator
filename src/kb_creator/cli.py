@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
+from kb_creator.build import (
+    apply_root_promotion,
+    build_book,
+    distill_to_root,
+    issue_permit,
+    status_vault,
+)
 from kb_creator.contracts import fail
 from kb_creator.health import run_health_checks
 from kb_creator.kb import (
@@ -18,6 +26,19 @@ from kb_creator.kb import (
 )
 from kb_creator.lint import run_lint_checks
 from kb_creator.query import run_query
+
+
+def _load_json_config(path: Path | None, *, action: str, label: str) -> dict:
+    if path is None:
+        return {}
+    if not path.exists():
+        fail(action, f"{label} not found: {path}")
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(action, f"failed to parse {label}: {exc}")
+        return {}
 
 
 def main() -> None:
@@ -68,6 +89,28 @@ def main() -> None:
     status_parser = subparsers.add_parser("status", help="Show KB repository status")
     status_parser.add_argument("kb_root", type=Path)
 
+    permit_parser = subparsers.add_parser("issue-permit", help="Issue a signed write permit for debug/test workflows")
+    permit_parser.add_argument("vault_root", type=Path)
+    permit_parser.add_argument("--scope", required=True, choices=["build-book", "apply-root-promotion"])
+    permit_parser.add_argument("--target", required=True)
+    permit_parser.add_argument("--expires-in", type=int, default=3600)
+
+    build_book_parser = subparsers.add_parser("build-book", help="Build one book-local KB from a source document")
+    build_book_parser.add_argument("vault_root", type=Path)
+    build_book_parser.add_argument("book_source", type=Path)
+    build_book_parser.add_argument("--permit", required=True, type=Path)
+    build_book_parser.add_argument("--split-config", type=Path, default=None)
+    build_book_parser.add_argument("--patch-queue", type=Path, default=None)
+
+    distill_parser = subparsers.add_parser("distill-to-root", help="Emit a root-promotion workset from a book-local KB")
+    distill_parser.add_argument("vault_root", type=Path)
+    distill_parser.add_argument("book_kb", type=Path)
+
+    apply_promotion_parser = subparsers.add_parser("apply-root-promotion", help="Apply one root-promotion workset")
+    apply_promotion_parser.add_argument("vault_root", type=Path)
+    apply_promotion_parser.add_argument("promotion_workset", type=Path)
+    apply_promotion_parser.add_argument("--permit", required=True, type=Path)
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -98,7 +141,30 @@ def main() -> None:
     elif args.command == "registry":
         result = registry_kb(args.kb_root)
     elif args.command == "status":
-        result = status_kb(args.kb_root)
+        if (args.kb_root / "wiki").is_dir():
+            result = status_kb(args.kb_root)
+        else:
+            result = status_vault(args.kb_root)
+    elif args.command == "issue-permit":
+        result = issue_permit(args.vault_root, scope=args.scope, target=args.target, expires_in_seconds=args.expires_in)
+    elif args.command == "build-book":
+        split_config = _load_json_config(args.split_config, action="build_book", label="split config")
+        result = build_book(
+            args.vault_root,
+            args.book_source,
+            permit_path=args.permit,
+            split_config=split_config,
+            patch_queue_path=args.patch_queue,
+        )
+    elif args.command == "distill-to-root":
+        result = distill_to_root(args.vault_root, args.book_kb)
+    elif args.command == "apply-root-promotion":
+        workset_path = args.promotion_workset
+        if not workset_path.exists():
+            candidate = args.vault_root / workset_path
+            if candidate.exists():
+                workset_path = candidate
+        result = apply_root_promotion(args.vault_root, workset_path, permit_path=args.permit)
     else:
         fail("kb", "missing subcommand")
         return

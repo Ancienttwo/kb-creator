@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.0] - 2026-04-19
+
+### Added
+
+- Two-tier vault runtime:
+  - `kb build-book` extracts one book, archives deterministic chapters under `raw/chapters/<book>/`, and rebuilds one book-local KB
+  - `kb distill-to-root` emits durable root-promotion worksets
+  - `kb apply-root-promotion` applies root-note updates through a single-writer step
+  - root-level `kb status` now reports per-book workflow state
+- Signed write-permit artifacts for guarded write-capable flows via `kb issue-permit`
+- New runtime modules:
+  - `src/kb_creator/build.py`
+  - `src/kb_creator/permits.py`
+- New integration coverage for book build, review-needed gating, root-promotion conflicts, tombstones, and permit validation
+
+### Changed
+
+- Product contract now matches the live two-tier `ziwei` vault shape instead of the older generic single-KB story
+- `.kb-state.json` now tracks per-book stages and root-promotion metadata in addition to legacy KB runtime fields
+- `KB_SCHEMA.md`, `README.md`, `SKILL.md`, and `docs/spec.md` now document book-local KBs plus root distillation
+
+### Fixed
+
+- Hard stop: `apply-root-promotion` now rejects workset `target_path` values that would escape the vault root
+- Repo-local `post-edit-guard.sh` now tolerates zero remaining unchecked tasks without exiting early under `set -euo pipefail`
+
 ## [0.1.1] - 2026-03-22
 
 ### Fixed

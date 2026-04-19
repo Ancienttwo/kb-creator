@@ -19,7 +19,10 @@ User-facing product surface for building and maintaining agent-usable KB repos. 
 - **Primary product surface** = this Skill.
 - **Bundled runtime** = `kb` CLI in this repo.
 - **Companion dependency Skill** = external `obsidian-markdown`.
-- **Intermediate artifacts** persist inside the KB root, especially `.kb-artifacts/`, `.kb-state.json`, `KB_SCHEMA.md`, `wiki/index.md`, and `wiki/log.md`.
+- **Canonical product model** = two-tier vault:
+  - book tier: one source book -> chapter archive -> one book-local KB
+  - root tier: book-local KB -> promotion workset -> shared root topic notes
+- **Intermediate artifacts** persist inside the vault root, especially `.kb-artifacts/`, `.kb-state.json`, `raw/sources/`, `raw/chapters/`, and book-local KB directories.
 
 Users should not need CLI knowledge. The Skill translates intent into CLI runs, post-processing, and dependency checks.
 
@@ -79,10 +82,11 @@ This Skill accepts a structured task object. If parameters are provided, use the
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `source_dir` | Yes | — | Path to source documents directory |
-| `kb_root` | Yes | — | Path to the KB repository root |
-| `link_mode` | No | `both` | `structural`, `semantic`, or `both` |
-| `summary_mode` | No | `extract` | `extract` or `generate` |
+| `book_source` | Yes | — | Path to one source document or a directory of one book's source files |
+| `vault_root` | Yes | — | Path to the two-tier vault root |
+| `split_config` | No | default runtime config | Split patterns / min-lines / max-lines for chapter archiving |
+| `patch_queue` | No | — | Optional approved source-patch queue for resolving QA findings during book build |
+| `permit` | Yes for write flows | — | Signed write-permit artifact path |
 | `resume` | No | `true` | Check `.kb-state.json` for recovery |
 
 ## Skill Workflow
@@ -99,17 +103,13 @@ This Skill accepts a structured task object. If parameters are provided, use the
 Use the CLI as the execution engine:
 
 ```bash
-${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py init <kb_root>
-${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py ingest <kb_root> <source_dir>
-${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py compile <kb_root> --emit-workset
-${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py health <kb_root>
-${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py lint <kb_root>
-${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py query <kb_root> --question "..."
-${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py registry <kb_root>
-${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py status <kb_root>
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py build-book <vault_root> <book_source> --permit <permit.json>
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py distill-to-root <vault_root> <book_kb>
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py apply-root-promotion <vault_root> <promotion_workset> --permit <permit.json>
+${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb.py status <vault_root>
 ```
 
-For source-layer cleanup flows that stop before wiki generation, use the low-level source-layout runtime:
+Low-level runtime surfaces remain available for debugging and narrowly scoped repair flows:
 
 ```bash
 ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-source-qa.py <source_dir> --artifacts-dir <source_dir>/.kb-artifacts
@@ -118,12 +118,13 @@ ${CLAUDE_SKILL_DIR}/.venv/bin/python ${CLAUDE_SKILL_DIR}/bin/kb-source-apply.py 
 
 ### Phase 2: Apply Obsidian Writing Contract
 
-When the workflow needs to create or rewrite wiki pages:
+When the workflow needs to create or rewrite book-local wiki pages or shared root notes:
 
 - load and follow the external `obsidian-markdown` Skill
 - treat it as the governing syntax contract for wikilinks, frontmatter, embeds, callouts, and note layout
 - do not emit free-form wiki mutations unless the dependency Skill is active
-- use deterministic CLI artifacts (`compile_workset.json`, `lint_report.json`, query outputs) as the source of truth for what to change
+- validate a signed write-permit artifact before any write-capable runtime command
+- use deterministic CLI artifacts (`compile_workset.json`, `lint_report.json`, root-promotion worksets, query outputs) as the source of truth for what to change
 
 For source-layer refinement, do not ask AI to rewrite whole chapters. The contract is:
 
@@ -177,8 +178,9 @@ If the Skill detects `.kb-state.json` on startup:
 
 1. Read state and report current phase and progress.
 2. Re-check that `obsidian-markdown` is available before resuming any wiki-writing phase.
-3. On continue: skip completed phases and resume from the current phase.
-4. On restart: backup old state file and start fresh.
+3. If the book is in `review-needed`, stop before root distillation unless the user explicitly waives it.
+4. On continue: skip completed stages and resume from the current book/root phase.
+5. On restart: backup old state file and start fresh.
 
 ## Developer / Debug Surface
 

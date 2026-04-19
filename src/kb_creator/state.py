@@ -1,7 +1,7 @@
 """State management for incremental kb-creator sessions.
 
-The .kb-state.json file tracks both legacy pipeline state and the newer
-KB-repository layout used by the top-level ``kb`` CLI.
+The .kb-state.json file tracks both legacy KB-root state and the newer
+two-tier vault state used by ``build-book`` and root distillation flows.
 """
 
 from __future__ import annotations
@@ -27,6 +27,21 @@ SOURCE_LAYER_STAGES = (
 
 def _default_source_layer_status() -> dict[str, bool]:
     return {stage: False for stage in SOURCE_LAYER_STAGES}
+
+
+BOOK_STAGE_NAMES = (
+    "extract_complete",
+    "split_complete",
+    "layout_qa_complete",
+    "patches_applied",
+    "book_compiled",
+    "distill_ready",
+    "root_promotion_applied",
+)
+
+
+def _default_book_stages() -> dict[str, bool]:
+    return {stage: False for stage in BOOK_STAGE_NAMES}
 
 
 @dataclass
@@ -59,6 +74,10 @@ class KBState:
     last_compile_workset: str = ""
     last_log_entry: str = ""
     source_layer_status: dict[str, bool] = field(default_factory=_default_source_layer_status)
+    books: dict[str, dict[str, Any]] = field(default_factory=dict)
+    last_root_promotion_workset: str = ""
+    last_root_promotion_report: str = ""
+    last_permit_path: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -82,6 +101,7 @@ class KBState:
         if not self.created_at:
             self.created_at = self.updated_at
         self.ensure_source_layer_status()
+        self.ensure_books()
         data = {
             k: v for k, v in self.__dict__.items()
             if not k.startswith("_")
@@ -170,3 +190,56 @@ class KBState:
         self.ensure_source_layer_status()
         for stage, value in updates.items():
             self.mark_source_layer_stage(stage, value)
+
+    def ensure_books(self) -> dict[str, dict[str, Any]]:
+        """Backfill the two-tier book state structure."""
+        current = dict(self.books or {})
+        for book_slug, payload in list(current.items()):
+            if not isinstance(payload, dict):
+                payload = {}
+                current[book_slug] = payload
+            stages = payload.get("stages") or {}
+            if not isinstance(stages, dict):
+                stages = {}
+            for stage in BOOK_STAGE_NAMES:
+                stages.setdefault(stage, False)
+            payload["stages"] = stages
+            payload.setdefault("qa_candidate_count", 0)
+            payload.setdefault("review_needed", False)
+            payload.setdefault("promotion_blocked", False)
+            payload.setdefault("tombstoned", False)
+            payload.setdefault("root_notes", [])
+        self.books = current
+        return current
+
+    def upsert_book(self, book_slug: str, **updates: Any) -> dict[str, Any]:
+        """Create or update one tracked book entry."""
+        self.ensure_books()
+        book = dict(self.books.get(book_slug) or {})
+        stages = dict(book.get("stages") or {})
+        for stage in BOOK_STAGE_NAMES:
+            stages.setdefault(stage, False)
+        if "stages" in updates:
+            for stage, value in dict(updates.pop("stages") or {}).items():
+                if stage in BOOK_STAGE_NAMES:
+                    stages[stage] = bool(value)
+        book["stages"] = stages
+        for key, value in updates.items():
+            book[key] = value
+        book.setdefault("root_notes", [])
+        book.setdefault("qa_candidate_count", 0)
+        book.setdefault("review_needed", False)
+        book.setdefault("promotion_blocked", False)
+        book.setdefault("tombstoned", False)
+        book["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self.books[book_slug] = book
+        return book
+
+    def mark_book_stage(self, book_slug: str, stage: str, value: bool = True) -> dict[str, Any]:
+        """Update one stage for a tracked book."""
+        if stage not in BOOK_STAGE_NAMES:
+            raise ValueError(f"unknown book stage: {stage}")
+        book = self.upsert_book(book_slug)
+        book["stages"][stage] = value
+        self.books[book_slug] = book
+        return book

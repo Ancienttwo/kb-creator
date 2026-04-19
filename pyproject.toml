@@ -1,6 +1,6 @@
 [project]
 name = "kb-creator"
-version = "0.2.0"
+version = "0.3.0"
 description = "Agent-first knowledge base creation toolkit for Obsidian vaults"
 requires-python = ">=3.11"
 dependencies = [

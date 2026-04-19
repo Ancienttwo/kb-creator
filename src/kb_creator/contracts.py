@@ -39,6 +39,7 @@ class Result:
         """Persist an intermediate artifact to disk and register it."""
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         path = artifacts_dir / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         self.artifacts[name] = str(path)
 

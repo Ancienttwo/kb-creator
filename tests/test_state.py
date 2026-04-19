@@ -76,3 +76,25 @@ def test_source_layer_status_defaults_and_updates(tmp_path):
     assert loaded.source_layer_status["split_complete"] is True
     assert loaded.source_layer_status["patches_pending"] is True
     assert loaded.source_layer_status["qa_verified"] is False
+
+
+def test_book_state_round_trip(tmp_path):
+    state = KBState(source_dir="/test")
+    state.upsert_book(
+        "alpha-book",
+        book_title="Alpha Book",
+        source_path="/tmp/alpha.md",
+        review_needed=True,
+        promotion_blocked=True,
+        stages={"extract_complete": True, "split_complete": True},
+    )
+    state.save(tmp_path)
+
+    loaded = KBState.load(tmp_path)
+    assert loaded is not None
+    book = loaded.books["alpha-book"]
+    assert book["book_title"] == "Alpha Book"
+    assert book["review_needed"] is True
+    assert book["promotion_blocked"] is True
+    assert book["stages"]["extract_complete"] is True
+    assert book["stages"]["distill_ready"] is False
